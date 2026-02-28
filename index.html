@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>TigerOG Jungle v2</title>
+  <style>
+    html,body{margin:0;height:100%;background:#061006;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #wrap{height:100%;display:flex;align-items:center;justify-content:center}
+    canvas{width:min(100vw, calc(100vh * 16/9));height:min(100vh, calc(100vw * 9/16));
+      background:#0d2a14; border-radius:14px; box-shadow:0 12px 40px rgba(0,0,0,.5);
+      image-rendering: pixelated; touch-action:none}
+  </style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // Render at a stable internal resolution (scaled by CSS)
+  const W = 960, H = 540;
+  canvas.width = W; canvas.height = H;
+
+  // Physics
+  const GRAVITY = 2200;
+  const JUMP = 820;
+  const GROUND_Y = 420;
+  const SPEED = 280;
+
+  // Sprite sheet
+  const sprite = new Image();
+  sprite.src = "tigerog_sprite.png";
+
+  const CELL = 64;     // each frame is 64x64 in the sheet
+  const COLS = 4;      // 4 columns
+  // frame indices (0..11) in a 4x3 sheet
+  const FR = {
+    IDLE: 0,
+    RUN: [1,2,3],
+    JUMP: 5,
+    FALL: 6,
+    VINE: [10,11]
+  };
+
+  // Game state
+  const player = {
+    x: 180, y: GROUND_Y - 64,
+    vx: 0, vy: 0,
+    onGround: true,
+    onVine: false,
+    frame: FR.IDLE,
+    frameT: 0,
+    facing: 1,
+    // vine swing param
+    vinePhase: 0
+  };
+
+  // One vine to start (you can add more later)
+  const vines = [
+    { x: 640, topY: 90, len: 210 }
+  ];
+
+  // Input (keyboard + touch zones)
+  const keys = { left:false, right:false, jump:false };
+
+  addEventListener("keydown", e => {
+    if (e.code==="ArrowLeft") keys.left = true;
+    if (e.code==="ArrowRight") keys.right = true;
+    if (e.code==="Space") { keys.jump = true; e.preventDefault(); }
+  }, {passive:false});
+
+  addEventListener("keyup", e => {
+    if (e.code==="ArrowLeft") keys.left = false;
+    if (e.code==="ArrowRight") keys.right = false;
+    if (e.code==="Space") keys.jump = false;
+  });
+
+  function setTouch(x, isDown){
+    keys.left = keys.right = keys.jump = false;
+    if(!isDown) return;
+    const third = W/3;
+    if (x < third) keys.left = true;
+    else if (x < 2*third) keys.jump = true;
+    else keys.right = true;
+  }
+
+  canvas.addEventListener("pointerdown", e => {
+    canvas.setPointerCapture(e.pointerId);
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W/rect.width);
+    setTouch(x, true);
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!e.buttons) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W/rect.width);
+    setTouch(x, true);
+  });
+  canvas.addEventListener("pointerup", () => setTouch(0,false));
+  canvas.addEventListener("pointercancel", () => setTouch(0,false));
+
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+  // scrolling world offset (simple)
+  let worldX = 0;
+
+  function update(dt){
+    // horizontal intent
+    const dir = (keys.right?1:0) - (keys.left?1:0);
+    player.vx = dir * SPEED;
+    if (dir !== 0) player.facing = dir;
+
+    // jump
+    if (keys.jump && player.onGround && !player.onVine){
+      player.vy = -JUMP;
+      player.onGround = false;
+    }
+
+    // attempt vine grab if airborne
+    if (!player.onGround && !player.onVine){
+      for (const v of vines){
+        const handX = player.x + 32; // approx center
+        const handY = player.y + 18; // approx upper body
+        const vineX = v.x;
+        const vineBottomY = v.topY + v.len;
+
+        // simple grab window near the bottom half of vine
+        if (Math.abs(handX - vineX) < 26 && handY > v.topY+40 && handY < vineBottomY-10){
+          player.onVine = true;
+          player.vy = 0;
+          player.vx = 0;
+          // start swing phase based on approach direction
+          player.vinePhase = (player.facing>0) ? 0 : Math.PI;
+          break;
+        }
+      }
+    }
+
+    if (player.onVine){
+      // swing (simple sinus motion)
+      player.vinePhase += dt * 2.6;
+      const v = vines[0]; // single vine for now
+      const swing = Math.sin(player.vinePhase) * 55;
+
+      // position player relative to vine
+      player.x = v.x + swing - 32;
+      player.y = v.topY + v.len - 64;
+
+      // release
+      if (keys.jump){
+        player.onVine = false;
+        player.onGround = false;
+        // launch forward a bit in the swing direction
+        player.vx = Math.cos(player.vinePhase) * 380;
+        player.vy = -520;
+      }
+
+      // vine animation
+      player.frameT += dt;
+      if (player.frameT > 0.14){
+        const idx = (player.frame === FR.VINE[0]) ? 1 : 0;
+        player.frame = FR.VINE[idx];
+        player.frameT = 0;
+      }
+      return; // skip ground physics while on vine
+    }
+
+    // gravity
+    player.vy += GRAVITY * dt;
+
+    // integrate
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    // bounds
+    player.x = clamp(player.x, 20, W-84);
+
+    // ground
+    if (player.y >= GROUND_Y - 64){
+      player.y = GROUND_Y - 64;
+      player.vy = 0;
+      player.onGround = true;
+    } else {
+      player.onGround = false;
+    }
+
+    // animations
+    if (!player.onGround){
+      player.frame = (player.vy < 0) ? FR.JUMP : FR.FALL;
+      player.frameT = 0;
+    } else if (Math.abs(player.vx) > 0){
+      player.frameT += dt;
+      if (player.frameT > 0.12){
+        // cycle RUN frames
+        const cur = FR.RUN.indexOf(player.frame);
+        const next = (cur === -1) ? 0 : (cur+1) % FR.RUN.length;
+        player.frame = FR.RUN[next];
+        player.frameT = 0;
+      }
+    } else {
+      player.frame = FR.IDLE;
+      player.frameT = 0;
+    }
+
+    // scroll world (visual only)
+    worldX += SPEED * dt;
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+
+    // background gradient
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,"#0f3319");
+    g.addColorStop(1,"#061006");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // parallax hills
+    ctx.fillStyle = "rgba(0,0,0,.22)";
+    ctx.beginPath();
+    ctx.moveTo(0, 320);
+    for (let x=0; x<=W; x+=120){
+      const y = 310 + Math.sin((x+worldX*0.15)*0.01)*18;
+      ctx.quadraticCurveTo(x+60, y, x+120, 320);
+    }
+    ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath();
+    ctx.fill();
+
+    // ground
+    ctx.fillStyle = "#2a5f35";
+    ctx.fillRect(0,GROUND_Y,W,H-GROUND_Y);
+    ctx.fillStyle = "rgba(0,0,0,.18)";
+    ctx.fillRect(0,GROUND_Y,W,6);
+
+    // vine
+    for (const v of vines){
+      ctx.strokeStyle = "#4cff4c";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(v.x, v.topY);
+      ctx.lineTo(v.x, v.topY + v.len);
+      ctx.stroke();
+    }
+
+    // sprite draw
+    const col = player.frame % COLS;
+    const row = Math.floor(player.frame / COLS);
+
+    ctx.save();
+    // flip if facing left
+    if (player.facing < 0){
+      ctx.translate(player.x + 64, 0);
+      ctx.scale(-1,1);
+      ctx.drawImage(sprite, col*CELL, row*CELL, CELL, CELL, 0, player.y, 64, 64);
+    } else {
+      ctx.drawImage(sprite, col*CELL, row*CELL, CELL, CELL, player.x, player.y, 64, 64);
+    }
+    ctx.restore();
+
+    // touch zone labels (subtle)
+    ctx.fillStyle = "rgba(255,255,255,.08)";
+    ctx.fillRect(0,H-56,W,56);
+    ctx.fillStyle = "rgba(255,255,255,.12)";
+    ctx.fillRect(W/3,H-56,1,56);
+    ctx.fillRect(2*W/3,H-56,1,56);
+    ctx.fillStyle = "rgba(255,255,255,.6)";
+    ctx.font = "12px system-ui";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("LEFT", W/6, H-28);
+    ctx.fillText("JUMP", W/2, H-28);
+    ctx.fillText("RIGHT", 5*W/6, H-28);
+    ctx.textAlign="start";
+  }
+
+  let last = 0;
+  function loop(ts){
+    const dt = Math.min(0.033, (ts-last)/1000 || 0);
+    last = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  sprite.onload = () => requestAnimationFrame(loop);
+  sprite.onerror = () => {
+    ctx.fillStyle="#fff";
+    ctx.fillText("Could not load tigerog_sprite.png", 20, 40);
+  };
+})();
+</script>
+</body>
+</html>
